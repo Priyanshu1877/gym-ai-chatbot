@@ -71,6 +71,7 @@ export default function App() {
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [editName, setEditName] = useState('');
   const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
 
   // Plan state
   const [showPlanForm, setShowPlanForm] = useState(false);
@@ -356,7 +357,8 @@ export default function App() {
   };
 
   const toggleListening = () => {
-    if (isListening) {
+    if (isListening && recognitionRef.current) {
+      recognitionRef.current.stop();
       setIsListening(false);
       return;
     }
@@ -368,25 +370,43 @@ export default function App() {
     }
 
     const recognition = new SpeechRecognition();
-    recognition.continuous = false;
+    recognitionRef.current = recognition;
+
+    recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = 'en-US';
+
+    let originalInput = input; // Capture what they already typed
 
     recognition.onstart = () => {
       setIsListening(true);
     };
 
     recognition.onresult = (event: any) => {
-      const transcript = Array.from(event.results)
-        .map((result: any) => result[0])
-        .map(result => result.transcript)
-        .join('');
-      setInput(transcript);
+      let interimTranscript = '';
+      let finalTranscript = '';
+
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        if (event.results[i].isFinal) {
+          finalTranscript += event.results[i][0].transcript;
+        } else {
+          interimTranscript += event.results[i][0].transcript;
+        }
+      }
+
+      // Update the input field with the original text + whatever is definitively transcribed + whatever they are currently saying
+      if (finalTranscript) {
+        originalInput = (originalInput + ' ' + finalTranscript).trim();
+      }
+
+      setInput((originalInput + ' ' + interimTranscript).trim());
     };
 
     recognition.onerror = (event: any) => {
       console.error("Speech recognition error:", event.error);
-      setIsListening(false);
+      if (event.error !== 'no-speech') {
+        setIsListening(false);
+      }
     };
 
     recognition.onend = () => {
