@@ -358,6 +358,7 @@ export default function App() {
 
   const toggleListening = () => {
     if (isListening && recognitionRef.current) {
+      recognitionRef.current.intentionallyStopped = true;
       recognitionRef.current.stop();
       setIsListening(false);
       return;
@@ -370,6 +371,7 @@ export default function App() {
     }
 
     const recognition = new SpeechRecognition();
+    recognition.intentionallyStopped = false;
     recognitionRef.current = recognition;
 
     recognition.continuous = true;
@@ -405,12 +407,21 @@ export default function App() {
     recognition.onerror = (event: any) => {
       console.error("Speech recognition error:", event.error);
       if (event.error !== 'no-speech') {
+        recognition.intentionallyStopped = true;
         setIsListening(false);
       }
     };
 
     recognition.onend = () => {
-      setIsListening(false);
+      if (!recognition.intentionallyStopped) {
+        try {
+          recognition.start();
+        } catch (e) {
+          setIsListening(false);
+        }
+      } else {
+        setIsListening(false);
+      }
     };
 
     recognition.start();
