@@ -16,7 +16,9 @@ import {
   Activity,
   Edit2,
   Check,
-  Bot
+  Bot,
+  Mic,
+  MicOff
 } from 'lucide-react';
 import * as am5 from "@amcharts/amcharts5";
 import * as am5xy from "@amcharts/amcharts5/xy";
@@ -68,6 +70,7 @@ export default function App() {
   const [showProfile, setShowProfile] = useState(false);
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [editName, setEditName] = useState('');
+  const [isListening, setIsListening] = useState(false);
 
   // Plan state
   const [showPlanForm, setShowPlanForm] = useState(false);
@@ -333,6 +336,11 @@ export default function App() {
             });
             fetchPlans();
           }
+          if (planData.progress_log) {
+            fetchProgress();
+            advice = advice.replace(/```json\n[\s\S]*?\n```/, '').trim();
+            advice += `\n\n*(I have automatically logged your progress!)*`;
+          }
         } catch (err) {
           console.error("Auto-fill parsing failed:", err);
         }
@@ -345,6 +353,47 @@ export default function App() {
     } finally {
       setIsTyping(false);
     }
+  };
+
+  const toggleListening = () => {
+    if (isListening) {
+      setIsListening(false);
+      return;
+    }
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert("Your browser does not support Speech Recognition. Please use Chrome.");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+
+    recognition.onstart = () => {
+      setIsListening(true);
+    };
+
+    recognition.onresult = (event: any) => {
+      const transcript = Array.from(event.results)
+        .map((result: any) => result[0])
+        .map(result => result.transcript)
+        .join('');
+      setInput(transcript);
+    };
+
+    recognition.onerror = (event: any) => {
+      console.error("Speech recognition error:", event.error);
+      setIsListening(false);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
+    recognition.start();
   };
 
   if (loading) return <div className="h-screen flex items-center justify-center bg-zinc-950 text-white">Loading...</div>;
@@ -680,6 +729,12 @@ export default function App() {
                   placeholder="Type a message..."
                   className="flex-1 bg-zinc-800 border-none rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
                 />
+                <button
+                  onClick={toggleListening}
+                  className={`p-3 rounded-xl transition-colors ${isListening ? 'bg-red-500 text-white animate-pulse' : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'}`}
+                >
+                  {isListening ? <MicOff size={20} /> : <Mic size={20} />}
+                </button>
                 <button
                   onClick={handleSendMessage}
                   className="bg-emerald-500 text-black p-3 rounded-xl hover:bg-emerald-400 transition-colors"

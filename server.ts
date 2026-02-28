@@ -22,6 +22,7 @@ declare global {
       name: string;
       email: string;
       avatar: string;
+      profile_context?: string;
     }
   }
 }
@@ -35,7 +36,8 @@ db.exec(`
     google_id TEXT UNIQUE,
     name TEXT,
     email TEXT,
-    avatar TEXT
+    avatar TEXT,
+    profile_context TEXT
   );
 
   CREATE TABLE IF NOT EXISTS progress (
@@ -65,6 +67,7 @@ db.exec(`
 
 try { db.exec("ALTER TABLE progress ADD COLUMN carbs INTEGER DEFAULT 0;"); } catch (e) { /* Ignore if it already exists */ }
 try { db.exec("ALTER TABLE progress ADD COLUMN fats INTEGER DEFAULT 0;"); } catch (e) { /* Ignore if it already exists */ }
+try { db.exec("ALTER TABLE users ADD COLUMN profile_context TEXT;"); } catch (e) { /* Ignore if it already exists */ }
 
 async function startServer() {
   const app = express();
@@ -254,11 +257,17 @@ async function startServer() {
   app.post("/api/chat", async (req, res) => {
     try {
       const { message, history } = req.body;
+      const user = (req as any).user;
 
       const messages = history.map((h: any) => ({
         role: h.role === "model" ? "assistant" : h.role,
         content: h.parts[0].text
       }));
+
+      let userContextStr = "";
+      if (user && user.profile_context) {
+        userContextStr = `\n\nUSER PROFILE CONTEXT (Remember this!):\n${user.profile_context}`;
+      }
 
       messages.unshift({
         role: "system",
@@ -302,7 +311,38 @@ Whenever you generate this specific plan for the day, YOU MUST append a JSON blo
   "diet_plan": "Short summary of the diet plan"
 }
 \`\`\`
-This JSON will be used to automatically update their Daily Protocol dashboard. Keep the JSON properties exactly as "workout_plan" and "diet_plan", providing realistic autofill data based on the conversation.`
+This JSON will be used to automatically update their Daily Protocol dashboard. Keep the JSON properties exactly as "workout_plan" and "diet_plan", providing realistic autofill data based on the conversation.
+
+Memory Extraction Context:
+Whenever the user explicitly tells you a fact about themselves that would be important to remember for future workouts or diets (such as injuries, available equipment, target weight, dietary restrictions, schedule constraints, etc.), YOU MUST add a third property to the JSON block called "memory" that concisely summarizes the new fact.
+Example:
+\`\`\`json
+{
+  "workout_plan": "...",
+  "diet_plan": "...",
+  "memory": "User has a bad left knee and only has access to dumbbells."
+}
+\`\`\`
+If there is no new fact to save in this message, do not include the "memory" property. Do not just repeat existing memory.
+
+Progress & Macro Extraction Protocol:
+If the user indicates they just completed a workout, drank water, or ate a meal, YOU MUST estimate the caloric/nutritional value and add a "progress_log" property to the JSON block.
+Example:
+\`\`\`json
+{
+  "workout_plan": "...",
+  "diet_plan": "...",
+  "progress_log": {
+    "workout_name": "Chicken Breast & Rice",
+    "calories": 450,
+    "protein": 45,
+    "carbs": 50,
+    "fats": 5,
+    "water": 0
+  }
+}
+\`\`\`
+If there is no completed meal or workout to log, do not include "progress_log".${userContextStr}`
       });
 
       messages.push({ role: "user", content: message });
@@ -333,7 +373,7 @@ This JSON will be used to automatically update their Daily Protocol dashboard. K
 
         if (!seemsToHaveDetails) {
           return res.json({
-            text: `*(Simulated Coach Mode)*\n\nI’d love to craft the perfect **Daily Routine** for you, but I need to understand your baseline first to ensure the protocol matches your goals and capabilities safely. \n\nCould you please share:\n1. Your current weight & height\n2. Your primary fitness goal (e.g., bodyweight mastery, cutting, bulking)\n3. Any dietary restrictions\n4. What equipment you have available\n\nOnce I have these, I'll generate a personalized plan for you to instantly track.`
+            text: `* (Simulated Coach Mode) *\n\nI’d love to craft the perfect ** Daily Routine ** for you, but I need to understand your baseline first to ensure the protocol matches your goals and capabilities safely.\n\nCould you please share: \n1.Your current weight & height\n2.Your primary fitness goal(e.g., bodyweight mastery, cutting, bulking) \n3.Any dietary restrictions\n4.What equipment you have available\n\nOnce I have these, I'll generate a personalized plan for you to instantly track.`
           });
         }
 
@@ -351,7 +391,37 @@ This JSON will be used to automatically update their Daily Protocol dashboard. K
       }
 
       const data = await response.json();
-      res.json({ text: data.choices[0].message.content });
+      let aiContent = data.choices[0].message.content;
+
+      // Extract new memory from JSON if present and save it
+      if (user) {
+        const jsonMatch = aiContent.match(/```json\n([\s\S]*?)\n```/);
+        if (jsonMatch) {
+          try {
+            const parsed = JSON.parse(jsonMatch[1]);
+            if (parsed.memory) {
+              const currentContext = user.profile_context ? user.profile_context + "\\n" : "";
+              const newContext = currentContext + "- " + parsed.memory;
+              db.prepare("UPDATE users SET profile_context = ? WHERE id = ?").run(newContext, user.id);
+              // Update user object in memory just to keep it synced for potential subsequent calls
+              user.profile_context = newContext;
+              console.log("Saved new memory for user", user.id, ":", parsed.memory);
+            }
+            if (parsed.progress_log) {
+              const p = parsed.progress_log;
+              const today = new Date().toISOString().split('T')[0];
+              db.prepare("INSERT INTO progress (user_id, date, workout_name, calories, protein, water, carbs, fats) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+                user.id, today, p.workout_name || "Log", p.calories || 0, p.protein || 0, p.water || 0, p.carbs || 0, p.fats || 0
+              );
+              console.log("Saved new progress log for user", user.id, ":", p);
+            }
+          } catch (e) {
+            console.error("Failed to parse AI JSON for memory/progress:", e);
+          }
+        }
+      }
+
+      res.json({ text: aiContent });
     } catch (e: any) {
       console.error(e);
       res.status(500).json({ error: e.message });
