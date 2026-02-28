@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import {
   Dumbbell,
   Utensils,
@@ -15,22 +15,18 @@ import {
   Wheat,
   Activity,
   Edit2,
-  Check
+  Check,
+  Bot
 } from 'lucide-react';
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-} from 'recharts';
+import * as am5 from "@amcharts/amcharts5";
+import * as am5xy from "@amcharts/amcharts5/xy";
+import am5themes_Animated from "@amcharts/amcharts5/themes/Animated";
+import am5themes_Dark from "@amcharts/amcharts5/themes/Dark";
 import { QRCodeSVG } from 'qrcode.react';
 import { motion, AnimatePresence } from 'motion/react';
 import { format } from 'date-fns';
 import ReactMarkdown from 'react-markdown';
-import { getFitnessAdvice } from './services/geminiService';
+import { getFitnessAdvice } from './services/chatService';
 
 interface User {
   id: number;
@@ -49,10 +45,19 @@ interface ProgressData {
   workout_name: string;
 }
 
+interface DailyPlan {
+  id: number;
+  date: string;
+  workout_plan: string;
+  diet_plan: string;
+  completed: boolean;
+}
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [progress, setProgress] = useState<ProgressData[]>([]);
+  const [dailyPlans, setDailyPlans] = useState<DailyPlan[]>([]);
   const [showQR, setShowQR] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [messages, setMessages] = useState<{ role: string, content: string }[]>([
@@ -63,6 +68,13 @@ export default function App() {
   const [showProfile, setShowProfile] = useState(false);
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [editName, setEditName] = useState('');
+
+  // Plan state
+  const [showPlanForm, setShowPlanForm] = useState(false);
+  const [planForm, setPlanForm] = useState({
+    workout_plan: '',
+    diet_plan: ''
+  });
 
   // Form state
   const [showForm, setShowForm] = useState(false);
@@ -93,16 +105,106 @@ export default function App() {
     return () => window.removeEventListener('message', handleMessage);
   }, []);
 
+  useLayoutEffect(() => {
+    if (!progress.length) return;
+
+    let root = am5.Root.new("chartdiv");
+
+    root.setThemes([
+      am5themes_Animated.new(root),
+      am5themes_Dark.new(root)
+    ]);
+
+    let chart = root.container.children.push(am5xy.XYChart.new(root, {
+      panX: true,
+      panY: true,
+      wheelX: "panX",
+      wheelY: "zoomX",
+      pinchZoomX: true
+    }));
+
+    let cursor = chart.set("cursor", am5xy.XYCursor.new(root, {
+      behavior: "none"
+    }));
+    cursor.lineY.set("visible", false);
+
+    let xAxisRenderer = am5xy.AxisRendererX.new(root, {});
+    xAxisRenderer.grid.template.set("strokeOpacity", 0);
+
+    let xAxis = chart.xAxes.push(am5xy.CategoryAxis.new(root, {
+      categoryField: "date",
+      renderer: xAxisRenderer,
+      tooltip: am5.Tooltip.new(root, {})
+    }));
+    xAxis.data.setAll(progress);
+
+    let yAxisRenderer = am5xy.AxisRendererY.new(root, {});
+    yAxisRenderer.grid.template.set("strokeOpacity", 0.1);
+    yAxisRenderer.grid.template.set("strokeDasharray", [3, 3]);
+
+    let yAxis = chart.yAxes.push(am5xy.ValueAxis.new(root, {
+      renderer: yAxisRenderer
+    }));
+
+    let series = chart.series.push(am5xy.LineSeries.new(root, {
+      name: "Calories",
+      xAxis: xAxis,
+      yAxis: yAxis,
+      valueYField: "calories",
+      categoryXField: "date",
+      tooltip: am5.Tooltip.new(root, {
+        labelText: "{valueY} kcal"
+      })
+    }));
+
+    series.strokes.template.setAll({
+      strokeWidth: 4,
+      stroke: am5.color(0x10b981) // emerald-500
+    });
+
+    series.bullets.push(function () {
+      return am5.Bullet.new(root, {
+        sprite: am5.Circle.new(root, {
+          radius: 5,
+          fill: am5.color(0x18181b),
+          stroke: am5.color(0x10b981),
+          strokeWidth: 2
+        })
+      });
+    });
+
+    series.data.setAll(progress);
+    series.appear(1000);
+    chart.appear(1000, 100);
+
+    return () => {
+      root.dispose();
+    };
+  }, [progress]);
+
   const fetchUser = async () => {
     try {
       const res = await fetch('/api/me');
       const data = await res.json();
       setUser(data);
-      if (data) fetchProgress();
+      if (data) {
+        fetchProgress();
+        fetchPlans();
+      }
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchPlans = async () => {
+    try {
+      const res = await fetch('/api/plans');
+      const data = await res.json();
+      setDailyPlans(data);
+    } catch (e) {
+      console.error(e);
     }
   };
 
@@ -145,6 +247,30 @@ export default function App() {
     fetchProgress();
   };
 
+  const handleSavePlan = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await fetch('/api/plans', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...planForm,
+        date: format(new Date(), 'MMM dd')
+      })
+    });
+    setPlanForm({ workout_plan: '', diet_plan: '' });
+    setShowPlanForm(false);
+    fetchPlans();
+  };
+
+  const handleTogglePlan = async (id: number, currentStatus: boolean) => {
+    await fetch(`/api/plans/${id}/complete`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ completed: !currentStatus })
+    });
+    fetchPlans();
+  };
+
   const handleSaveProfile = async () => {
     if (!editName.trim()) return;
     try {
@@ -176,10 +302,46 @@ export default function App() {
         role: m.role === 'user' ? 'user' : 'model',
         parts: [{ text: m.content }]
       }));
-      const advice = await getFitnessAdvice(input, history);
+      let advice = await getFitnessAdvice(input, history);
+
+      // Auto-fill parsing
+      const jsonMatch = advice.match(/```json\n([\s\S]*?)\n```/);
+      if (jsonMatch) {
+        try {
+          const planData = JSON.parse(jsonMatch[1]);
+          if (planData.workout_plan || planData.diet_plan) {
+            advice = advice.replace(/```json\n[\s\S]*?\n```/, '').trim();
+
+            let planMarkdown = `\n\n### 📝 Your Generated Protocol\n\n`;
+            if (planData.workout_plan) {
+              planMarkdown += `**Workout Plan:**\n${planData.workout_plan}\n\n`;
+            }
+            if (planData.diet_plan) {
+              planMarkdown += `**Diet Plan:**\n${planData.diet_plan}\n\n`;
+            }
+
+            advice += planMarkdown + "*(I have automatically attached this plan to your Daily Protocol!)*";
+
+            await fetch('/api/plans', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                workout_plan: planData.workout_plan || '',
+                diet_plan: planData.diet_plan || '',
+                date: format(new Date(), 'MMM dd')
+              })
+            });
+            fetchPlans();
+          }
+        } catch (err) {
+          console.error("Auto-fill parsing failed:", err);
+        }
+      }
+
       setMessages([...newMessages, { role: 'model', content: advice || 'I am here to help!' }]);
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
+      setMessages([...newMessages, { role: 'model', content: `**Error:** ${e.message}` }]);
     } finally {
       setIsTyping(false);
     }
@@ -266,10 +428,7 @@ export default function App() {
           </div>
         </div>
         <div className="flex items-center gap-4">
-          <button onClick={() => setShowQR(true)} className="p-2 hover:bg-zinc-900 rounded-full transition-colors">
-            <QrCode size={20} />
-          </button>
-          <div className="flex items-center gap-3 pl-4 border-l border-zinc-800">
+          <div className="flex items-center gap-3">
             <button onClick={() => setShowProfile(true)} className="hover:scale-105 transition-transform">
               <img src={user.avatar} className="w-8 h-8 rounded-full border border-zinc-700" alt={user.name} />
             </button>
@@ -288,53 +447,67 @@ export default function App() {
         </section>
 
         {/* Stats Grid */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-          <div className="bg-zinc-900/50 p-6 rounded-3xl border border-zinc-800/50">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 bg-orange-500/10 rounded-lg">
-                <Flame size={20} className="text-orange-500" />
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div className="bg-zinc-900/50 p-4 rounded-2xl border border-zinc-800/50">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="p-1.5 bg-orange-500/10 rounded-md">
+                <Flame size={18} className="text-orange-500" />
               </div>
               <span className="text-sm font-medium text-zinc-400">Calories</span>
             </div>
-            <div className="text-3xl font-bold">{progress[progress.length - 1]?.calories || 0} <span className="text-sm font-normal text-zinc-500">kcal</span></div>
+            <div className="text-2xl font-bold">{progress[progress.length - 1]?.calories || 0} <span className="text-sm font-normal text-zinc-500">kcal</span></div>
           </div>
-          <div className="bg-zinc-900/50 p-6 rounded-3xl border border-zinc-800/50">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 bg-purple-500/10 rounded-lg">
-                <Beef size={20} className="text-purple-500" />
+          <div className="bg-zinc-900/50 p-4 rounded-2xl border border-zinc-800/50">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="p-1.5 bg-purple-500/10 rounded-md">
+                <Beef size={18} className="text-purple-500" />
               </div>
               <span className="text-sm font-medium text-zinc-400">Protein</span>
             </div>
-            <div className="text-3xl font-bold">{progress[progress.length - 1]?.protein || 0} <span className="text-sm font-normal text-zinc-500">g</span></div>
+            <div className="text-2xl font-bold">{progress[progress.length - 1]?.protein || 0} <span className="text-sm font-normal text-zinc-500">g</span></div>
           </div>
-          <div className="bg-zinc-900/50 p-6 rounded-3xl border border-zinc-800/50">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 bg-yellow-500/10 rounded-lg">
-                <Wheat size={20} className="text-yellow-500" />
+          <div className="bg-zinc-900/50 p-4 rounded-2xl border border-zinc-800/50">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="p-1.5 bg-yellow-500/10 rounded-md">
+                <Wheat size={18} className="text-yellow-500" />
               </div>
               <span className="text-sm font-medium text-zinc-400">Carbs</span>
             </div>
-            <div className="text-3xl font-bold">{progress[progress.length - 1]?.carbs || 0} <span className="text-sm font-normal text-zinc-500">g</span></div>
+            <div className="text-2xl font-bold">{progress[progress.length - 1]?.carbs || 0} <span className="text-sm font-normal text-zinc-500">g</span></div>
           </div>
-          <div className="bg-zinc-900/50 p-6 rounded-3xl border border-zinc-800/50">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 bg-red-500/10 rounded-lg">
-                <Activity size={20} className="text-red-500" />
+          <div className="bg-zinc-900/50 p-4 rounded-2xl border border-zinc-800/50">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="p-1.5 bg-red-500/10 rounded-md">
+                <Activity size={18} className="text-red-500" />
               </div>
               <span className="text-sm font-medium text-zinc-400">Fats</span>
             </div>
-            <div className="text-3xl font-bold">{progress[progress.length - 1]?.fats || 0} <span className="text-sm font-normal text-zinc-500">g</span></div>
+            <div className="text-2xl font-bold">{progress[progress.length - 1]?.fats || 0} <span className="text-sm font-normal text-zinc-500">g</span></div>
           </div>
-          <div className="bg-zinc-900/50 p-6 rounded-3xl border border-zinc-800/50">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 bg-blue-500/10 rounded-lg">
-                <Droplets size={20} className="text-blue-500" />
+          <div className="bg-zinc-900/50 p-4 rounded-2xl border border-zinc-800/50">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="p-1.5 bg-blue-500/10 rounded-md">
+                <Droplets size={18} className="text-blue-500" />
               </div>
               <span className="text-sm font-medium text-zinc-400">Water</span>
             </div>
-            <div className="text-3xl font-bold">{progress[progress.length - 1]?.water || 0} <span className="text-sm font-normal text-zinc-500">ml</span></div>
+            <div className="text-2xl font-bold">{progress[progress.length - 1]?.water || 0} <span className="text-sm font-normal text-zinc-500">ml</span></div>
           </div>
         </div>
+
+        {/* Track Workout Section */}
+        <section className="bg-emerald-500/10 border border-emerald-500/20 p-6 rounded-3xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+          <div>
+            <h3 className="text-xl font-bold text-emerald-500 mb-1">Track Workout & Macros</h3>
+            <p className="text-sm text-zinc-400">Log your recent activity to update your stats and progress chart.</p>
+          </div>
+          <button
+            onClick={() => setShowForm(true)}
+            className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-black px-6 py-3 rounded-2xl transition-all active:scale-95 font-bold shadow-lg shadow-emerald-500/20 whitespace-nowrap"
+          >
+            <Plus size={20} /> <span className="md:inline">Log Activity</span>
+          </button>
+        </section>
 
         {/* Progress Chart */}
         <section className="bg-zinc-900/30 p-8 rounded-[40px] border border-zinc-800/50">
@@ -343,41 +516,68 @@ export default function App() {
               <h3 className="text-xl font-bold mb-1">Weekly Progress</h3>
               <p className="text-sm text-zinc-500 italic">Calorie intake overview</p>
             </div>
-            <button
-              onClick={() => setShowForm(true)}
-              className="bg-emerald-500 hover:bg-emerald-400 text-black p-3 rounded-2xl transition-all active:scale-95 shadow-lg shadow-emerald-500/20"
-            >
-              <Plus size={24} />
-            </button>
           </div>
 
-          <div className="h-[300px] w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={progress}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                <XAxis
-                  dataKey="date"
-                  axisLine={false}
-                  tickLine={false}
-                  tick={{ fill: '#71717a', fontSize: 12 }}
-                  dy={10}
-                />
-                <YAxis hide />
-                <Tooltip
-                  cursor={{ stroke: '#27272a', strokeWidth: 2 }}
-                  contentStyle={{ backgroundColor: '#18181b', border: 'none', borderRadius: '12px', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }}
-                  itemStyle={{ color: '#10b981', fontWeight: 'bold' }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="calories"
-                  stroke="#10b981"
-                  strokeWidth={4}
-                  dot={{ fill: '#18181b', r: 4, strokeWidth: 2, stroke: '#10b981' }}
-                  activeDot={{ r: 8, strokeWidth: 0, fill: '#10b981' }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+          <div id="chartdiv" className="h-[300px] w-full" />
+        </section>
+
+        {/* Diet & Workout Chart Section */}
+        <section>
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
+            <div>
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-emerald-500/10 rounded-lg">
+                  <Bot size={24} className="text-emerald-500" />
+                </div>
+                <h3 className="text-xl font-bold">Workout & Diet Chart</h3>
+              </div>
+              <p className="text-sm text-zinc-500 mt-2">Your personalized routines generated by Sweat Fix Coach</p>
+            </div>
+            <button
+              onClick={() => setShowPlanForm(true)}
+              className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-sm font-bold rounded-xl transition-colors"
+            >
+              Update Plan
+            </button>
+          </div>
+          <div className="space-y-4">
+            {dailyPlans.length > 0 ? dailyPlans.slice(0, 3).map((plan, i) => (
+              <div key={i} className={`p-6 rounded-[24px] border ${plan.completed ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-zinc-900/50 border-zinc-800/50'} transition-colors`}>
+                <div className="flex justify-between items-start mb-4">
+                  <div>
+                    <span className="text-xs font-bold uppercase tracking-widest text-zinc-500">{plan.date === format(new Date(), 'MMM dd') ? 'Today' : plan.date}</span>
+                    <h4 className={`text-lg font-bold mt-1 ${plan.completed ? 'text-emerald-500 line-through opacity-70' : 'text-white'}`}>Daily Routine</h4>
+                  </div>
+                  <button
+                    onClick={() => handleTogglePlan(plan.id, plan.completed)}
+                    className={`w-8 h-8 rounded-full flex items-center justify-center border-2 transition-colors ${plan.completed ? 'bg-emerald-500 border-emerald-500 text-black' : 'border-zinc-700 text-transparent hover:border-emerald-500'}`}
+                  >
+                    <Check size={16} />
+                  </button>
+                </div>
+
+                <div className={`grid grid-cols-1 md:grid-cols-2 gap-4 ${plan.completed ? 'opacity-50' : ''}`}>
+                  <div className="bg-zinc-950/50 p-4 rounded-2xl">
+                    <div className="flex items-center gap-2 mb-2 text-zinc-400">
+                      <Dumbbell size={16} />
+                      <span className="text-sm font-bold uppercase tracking-widest text-emerald-500">Workout Chart</span>
+                    </div>
+                    <p className="text-sm whitespace-pre-wrap">{plan.workout_plan || 'No training logged.'}</p>
+                  </div>
+                  <div className="bg-zinc-950/50 p-4 rounded-2xl">
+                    <div className="flex items-center gap-2 mb-2 text-zinc-400">
+                      <Utensils size={16} />
+                      <span className="text-sm font-bold uppercase tracking-widest text-emerald-500">Diet Plan</span>
+                    </div>
+                    <p className="text-sm whitespace-pre-wrap">{plan.diet_plan || 'No nutrition logged.'}</p>
+                  </div>
+                </div>
+              </div>
+            )) : (
+              <div className="text-center py-12 text-zinc-600 border-2 border-dashed border-zinc-800 rounded-3xl">
+                No daily plan set. Log your workout and diet protocols for the day.
+              </div>
+            )}
           </div>
         </section>
 
@@ -585,27 +785,56 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* QR Modal */}
+      {/* Daily Plan Modal */}
       <AnimatePresence>
-        {showQR && (
-          <div className="fixed inset-0 bg-black/90 backdrop-blur-md z-[70] flex items-center justify-center p-6" onClick={() => setShowQR(false)}>
+        {showPlanForm && (
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[60] flex items-center justify-center p-6">
             <motion.div
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
-              className="bg-white p-12 rounded-[40px] text-center"
-              onClick={e => e.stopPropagation()}
+              className="bg-zinc-900 w-full max-w-lg rounded-[32px] border border-zinc-800 overflow-hidden shadow-2xl flex flex-col max-h-[90vh]"
             >
-              <h3 className="text-black text-2xl font-bold mb-2">Access Sweat Fix</h3>
-              <p className="text-zinc-500 mb-8">Scan to open your dashboard</p>
-              <div className="p-4 bg-zinc-100 rounded-3xl inline-block">
-                <QRCodeSVG value={window.location.href} size={250} />
+              <div className="p-8 flex-shrink-0 flex justify-between items-center border-b border-zinc-800/50">
+                <h3 className="text-2xl font-bold">Daily Protocol</h3>
+                <button onClick={() => setShowPlanForm(false)} className="text-zinc-500 hover:text-white">
+                  <Plus className="rotate-45" size={28} />
+                </button>
               </div>
-              <button
-                onClick={() => setShowQR(false)}
-                className="mt-8 text-zinc-400 hover:text-black font-bold uppercase tracking-widest text-xs"
-              >
-                Close
-              </button>
+
+              <div className="p-8 overflow-y-auto">
+                <form onSubmit={handleSavePlan} className="space-y-6">
+                  <div>
+                    <label className="flex items-center gap-2 text-xs font-bold text-emerald-500 uppercase tracking-widest mb-3">
+                      <Dumbbell size={16} /> Workout Plan
+                    </label>
+                    <textarea
+                      required
+                      value={planForm.workout_plan}
+                      onChange={e => setPlanForm({ ...planForm, workout_plan: e.target.value })}
+                      placeholder="E.g., 4x10 Pull-ups, 3x15 Push-ups"
+                      className="w-full bg-zinc-800 border-none rounded-xl px-4 py-4 text-white focus:ring-2 focus:ring-emerald-500 outline-none min-h-[120px] resize-y"
+                    />
+                  </div>
+                  <div>
+                    <label className="flex items-center gap-2 text-xs font-bold text-emerald-500 uppercase tracking-widest mb-3">
+                      <Utensils size={16} /> Nutrition Plan
+                    </label>
+                    <textarea
+                      required
+                      value={planForm.diet_plan}
+                      onChange={e => setPlanForm({ ...planForm, diet_plan: e.target.value })}
+                      placeholder="E.g., Breakfast: Oatmeal & Eggs. Lunch: Chicken & Rice."
+                      className="w-full bg-zinc-800 border-none rounded-xl px-4 py-4 text-white focus:ring-2 focus:ring-emerald-500 outline-none min-h-[120px] resize-y"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    className="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-5 rounded-2xl transition-all active:scale-95 shadow-xl shadow-emerald-500/20 mt-4"
+                  >
+                    Lock In Plan
+                  </button>
+                </form>
+              </div>
             </motion.div>
           </div>
         )}
