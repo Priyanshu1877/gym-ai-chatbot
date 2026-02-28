@@ -1,20 +1,6 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# My Awesome Web App
 
-# Run and deploy your AI Studio app
+A brief description of what your web application does.
 
-This contains everything you need to run your app locally.
+🚀 **[Live Demo: Access the Web App Here](https://slategray-hyena-633272.hostingersite.com/)** 🚀
 
-View your app in AI Studio: https://ai.studio/apps/90ff3b34-d82a-4011-bdd7-3074269be6f5
-
-## Run Locally
-
-**Prerequisites:**  Node.js
-
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
